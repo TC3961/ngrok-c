@@ -25,20 +25,23 @@ char *rand_str(char *str,const int len)
 
 
 
-int SendReqTunnel(int sock,ssl_context *ssl,char *ReqId,const char *protocol,const char * HostName,const char * Subdomain,int RemotePort,char *authtoken)
+int SendReqTunnel(int sock,ssl_context *ssl,TunnelInfo *tunnelInfo)
 {
     char guid[20]={0};
     rand_str(guid,5);
     char str[1024];
     memset(str,0,1024);
-    memcpy(ReqId,guid,strlen(guid));//copy
-    sprintf(str,"{\"Type\":\"ReqTunnel\",\"Payload\":{\"Protocol\":\"%s\",\"ReqId\":\"%s\",\"Hostname\": \"%s\",\"Subdomain\":\"%s\",\"HttpAuth\":\"\",\"RemotePort\":%d,\"authtoken\":\"%s\"}}",protocol,guid,HostName,Subdomain,RemotePort,authtoken);
+    memset(tunnelInfo->ReqId,0,20);
+    //copy
+    memcpy(tunnelInfo->ReqId,guid,strlen(guid));
+    sprintf(str,"{\"Type\":\"ReqTunnel\",\"Payload\":{\"Protocol\":\"%s\",\"ReqId\":\"%s\",\"Hostname\": \"%s\",\"Subdomain\":\"%s\",\"HttpAuth\":\"\",\"RemotePort\":%d,\"authtoken\":\"%s\"}}",tunnelInfo->protocol,tunnelInfo->ReqId,tunnelInfo->hostname,tunnelInfo->subdomain,tunnelInfo->remoteport,mainInfo.authtoken);
+    tunnelInfo->regtime=getUnixTime();//ÒÑ·¢
     return sendpack(sock,ssl,str,1);
 }
 
 
 
-int loadargs( int argc, char **argv ,list<TunnelInfo*>*tunnellist,char *s_name,int * s_port,char * authtoken,char *password,string *ClientId)
+int loadargs( int argc, char **argv )
 {
 	if ( argc > 1 )
 	{
@@ -73,23 +76,48 @@ int loadargs( int argc, char **argv ,list<TunnelInfo*>*tunnellist,char *s_name,i
 						}else  {
 							memcpy( jsonstr, argvstr + pos + 1, xpos );
 						}
-						getvalue(jsonstr,"Shost",s_name);
+						getvalue(jsonstr,"Shost",mainInfo.shost);
 						if(getvalue(jsonstr,"Sport",temp)==0)
                         {
-                            *s_port = atoi(temp);
+                            mainInfo.sport = atoi(temp);
 						}
-						getvalue(jsonstr,"Atoken",authtoken);
-						getvalue(jsonstr,"Password",password);
+						getvalue(jsonstr,"Atoken",mainInfo.authtoken);
+						getvalue(jsonstr,"Password",mainInfo.pwdc);
 
 						if(getvalue(jsonstr,"Cid",temp)==0)
                         {
-                            *ClientId = string( temp );
+                            mainInfo.ClientId = string( temp );
 						}
 
 						pos = pos + xpos + 1;
 					}
 				}
-
+                #if UDPTUNNEL
+				if ( strncmp( argvstr, "-UDPSER", 7 ) == 0 )
+				{
+					run = 1;
+					while ( run )
+					{
+						memset( jsonstr, 0, 1024 );
+						xpos = strpos( argvstr + pos + 1, ',' );
+						if ( xpos == -1 )
+						{
+							xpos = strpos( argvstr + pos + 1, ']' );
+							memcpy( jsonstr, argvstr + pos + 1, xpos );
+							run = 0;
+						}else  {
+							memcpy( jsonstr, argvstr + pos + 1, xpos );
+						}
+						getvalue(jsonstr,"Shost",mainInfo.udphost);
+						if(getvalue(jsonstr,"Sport",temp)==0)
+                        {
+                            mainInfo.udpport = atoi(temp);
+						}
+						pos = pos + xpos + 1;
+					}
+					mainInfo.udp=1;
+				}
+                #endif
 				if ( strncmp( argvstr, "-AddTun", 7 ) == 0 )
 				{
 					run = 1;
@@ -124,19 +152,21 @@ int loadargs( int argc, char **argv ,list<TunnelInfo*>*tunnellist,char *s_name,i
                         {
                             tunnelinfo->remoteport = atoi( temp );
                         }
+
                         getvalue(jsonstr,"Sdname",tunnelinfo->subdomain);
+                        getvalue(jsonstr,"Hostheader",tunnelinfo->hostheader);
                         getvalue(jsonstr,"Hostname",tunnelinfo->hostname);
 						pos = pos + xpos + 1;
 					}
 
-					(*tunnellist).push_back(tunnelinfo);
+					G_TunnelList.push_back(tunnelinfo);
 				}
 			}
 		}
 	}else  {
 		echo( "use " );
         echo("%s",argv[0]);
-		echo( " -SER[Shost:ngrokd.ngrok.com,Sport:443,Atoken:xxxxxxx,Password:xxx] -AddTun[Type:tcp,Lhost:127.0.0.1,Lport:80,Rport:50199]" );
+		echo( " -SER[Shost:ngrokd.ngrok.com,Sport:443,Atoken:xxxxxxx,Password:xxx] -AddTun[Type:tcp,Lhost:127.0.0.1,Lport:80,Rport:50199,Hostheader:localhost]" );
 		echo( "\r\n" );
 		exit( 1 );
 	}

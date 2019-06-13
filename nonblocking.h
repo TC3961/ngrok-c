@@ -1,7 +1,6 @@
 #ifndef NONBLOCKING_H_INCLUDED
 #define NONBLOCKING_H_INCLUDED
 #include "config.h"
-
 #include <string.h>
 #if  WIN32
 #include <winsock.h>
@@ -63,7 +62,7 @@ inline int SetKeepAlive(int sock){
     //nRet = WSAIoctl(sock, SIO_KEEPALIVE_VALS, &alive_in, sizeof(alive_in),&alive_out, sizeof(alive_out), &ulBytesReturn, NULL, NULL);
     if (nRet == SOCKET_ERROR)
     {
-    return -1;
+        return -1;
     }
     return 0;
 }
@@ -86,33 +85,6 @@ return 0;
 
 
 
-#if OPENSSL
-struct sockinfo
-{
-    openssl_info *sslinfo;
-    int isconnect;
-    int istype; //1=remote 2=local,3=cmd
-    int tosock;
-    unsigned char *packbuf;
-    unsigned long long packbuflen;
-    int isconnectlocal;
-    int linktime;
-    int isauth;
-};
-#else
-struct sockinfo
-{
-    ssl_info *sslinfo;
-    int isconnect;
-    int istype; //1=remote 2=local,3=cmd
-    int tosock;
-    unsigned char *packbuf;
-    unsigned long long packbuflen;
-    int isconnectlocal;
-    int linktime;
-    int isauth;
-};
-#endif
 
 inline int setnonblocking(int sServer,int _nMode)
 {
@@ -156,7 +128,7 @@ inline int check_sock(int sock)
     return error;
 }
 
-void clearsock(int sock,sockinfo * sock_info);
+void clearsock(Sockinfo * sock_info);
 
 inline int SetBufSize(int sock)
 {

@@ -2,41 +2,9 @@
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
-#include <map>
-#include <list>
 #include <iostream>
 #include <iomanip>
 #include <signal.h>
-
-
-
-
-#if OPENSSL
-#include <openssl/ssl.h>
-#include <openssl/bio.h>
-#include <openssl/err.h>
-#else
-
-#if ISMBEDTLS
-#include <mbedtls/ssl.h>
-#include <mbedtls/net.h>
-#include <mbedtls/debug.h>
-#include <mbedtls/entropy.h>
-#include <mbedtls/ctr_drbg.h>
-#include <mbedtls/error.h>
-#include <mbedtls/certs.h>
-//typedef mbedtls_ssl_read ssl_read;
-#else
-#include <polarssl/net.h>
-#include <polarssl/debug.h>
-#include <polarssl/ssl.h>
-#include <polarssl/entropy.h>
-#include <polarssl/ctr_drbg.h>
-#include <polarssl/error.h>
-#include <polarssl/certs.h>
-#endif // ISMBEDTLS
-
-#endif
 
 
 #if  WIN32
@@ -63,24 +31,14 @@
 #include "ngrok.h"
 #include "sslbio.h"
 #include "nonblocking.h"
-
+#if UDPTUNNEL
+#include "udp.h"
+#endif
 using namespace std;
 //string VER = "1.35-(2016/5/13)";
-char VER[24]= "1.40-(2016/10/27)";
+char VER[24]= "1.52-(2019/02/18)";
 
-char s_name[255]="ngrokd.ngrok.com";
-int	s_port= 443;
-char authtoken[255]="";
-char password[255]={0};//
-string ClientId = "";
-int	pingtime	= 0;
-int	ping		= 25; //不能大于30
-int	mainsock=0;
-int	lastdnstime=0;
-int mainsockstatus=1;
-int regtunneltime=0;
-int	lastdnsback;
-int lasterrtime=0;
+
 ssl_info *mainsslinfo=NULL;
 
 #if UDPCMD
@@ -89,12 +47,8 @@ int udpport=1885;
 #endif
 
 void* proxy( );
-struct sockaddr_in server_addr = { 0 };
 
-map<int,sockinfo*>socklist;
-//map<string,TunnelInfo*>tunnellist;
-list<TunnelInfo*> tunnellist;
-map<string,TunnelReq*> tunneladdr;
+
 void cs( int n )
 {
 	if(n == SIGINT )
@@ -110,15 +64,15 @@ int CheckStatus()
 {
 
     //判断是否存在
-    if (socklist.count(mainsock)==0||mainsock==0)
+    if (G_SockList.count(mainInfo.mainsock)==0||mainInfo.mainsock==0)
     {
-        if(lasterrtime==0||(lasterrtime+60)<get_curr_unixtime()){
+        if(mainInfo.lasterrtime==0||(mainInfo.lasterrtime+60)<getUnixTime()){
             //连接失败
-            if(ConnectMain(&mainsock,server_addr,&mainsslinfo,&ClientId,&socklist,authtoken,password)==-1)
+            if(ConnectMain(&mainInfo.mainsock,mainInfo.saddr,&mainsslinfo)==-1)
             {
-                mainsockstatus=0;
+                mainInfo.mainsockstatus=0;
                 printf("link err\r\n");
-                lasterrtime=get_curr_unixtime();
+                mainInfo.lasterrtime=getUnixTime();
                 return -1;
             }
         }
@@ -127,27 +81,31 @@ int CheckStatus()
 }
 /*检测ping*/
 int checkping(){
-    if(pingtime+ping<get_curr_unixtime()&&socklist.count(mainsock)!=0&&mainsock!=0)
+    if(mainInfo.pingtime+mainInfo.ping<getUnixTime()&&G_SockList.count(mainInfo.mainsock)!=0&&mainInfo.mainsock!=0)
     {
         #if OPENSSL
-        int sendlen = SendPing(mainsock, mainsslinfo->ssl );
+        int sendlen = SendPing(mainInfo.mainsock, mainsslinfo->ssl );
         #else
-        int sendlen = SendPing(mainsock, &mainsslinfo->ssl );
+        int sendlen = SendPing(mainInfo.mainsock, &mainsslinfo->ssl );
         #endif
+
         //发送失败断开连接
         if(sendlen<1)
         {
-            mainsockstatus=0;
+            mainInfo.mainsockstatus=0;
         }
-        pingtime = get_curr_unixtime();
+        mainInfo.pingtime = getUnixTime();
     }
     return 0;
 }
 
 int main( int argc, char **argv )
 {
+    //rand
+    srand(time(0));
+    InitMainInfo();//初始化结构体
     printf("ngrokc v%s \r\n",VER);
-	loadargs( argc, argv, &tunnellist, s_name, &s_port, authtoken,password,&ClientId );
+	loadargs( argc, argv);
     #if WIN32
 	signal( SIGINT, cs );
     #else
@@ -171,27 +129,20 @@ int main( int argc, char **argv )
     #endif
 
     #if OPENSSL
-        #if OPENSSLDL
-        const char *err=AbreSSL();
-        if(err!=NULL)
-        {
-            printf("OpenSSL init fail.\r\nPlease check if the OpenSSL is installed. \r\n%s not found.\r\n",err);
-            exit(0);
-        }
-        #else
-        SSL_library_init();
-        SSL_load_error_strings();
-        OpenSSL_add_all_algorithms();
-        #endif
-    #endif // OPENSSL
+    ssl_lib_init();
+    #else
     init_ssl_session();
+    #endif // OPENSSL
 
 	/* init addr */
-	lastdnsback	= net_dns( &server_addr, s_name, s_port );
-	lastdnstime	= get_curr_unixtime();
+	mainInfo.lastdnsback	= net_dns( &mainInfo.saddr, mainInfo.shost, mainInfo.sport );
+	mainInfo.lastdnstime	= getUnixTime();
     #if UDPCMD
     udpsocket=ControlUdp(udpport);
     #endif // UDPCMD
+    #if UDPTUNNEL
+    initUdp();
+    #endif // UDPTUNNEL
     proxy();
 	return(0);
 }
@@ -209,14 +160,14 @@ void* proxy(  )
 	int		maxfdp		= 0;
 	int ret=0;
 	ssl_info *sslinfo1;
-	sockinfo *tempinfo ;
-	sockinfo *tempinfo1;
-	map<int, sockinfo*>::iterator it;
-	map<int, sockinfo*>::iterator it1;
-	map<int, sockinfo*>::iterator it3;
+	Sockinfo *tempinfo ;
+	Sockinfo *tempinfo1;
+	map<int, Sockinfo*>::iterator it;
+	map<int, Sockinfo*>::iterator it1;
+	map<int, Sockinfo*>::iterator it3;
     list<TunnelInfo*>::iterator listit;
     TunnelInfo *tunnelinfo;
-    char ReqId[20]={0};
+ //   char ReqId[20]={0};
 	int backcode=0;
 
 	while ( true )
@@ -224,55 +175,58 @@ void* proxy(  )
         //ping
         checkping();//ping
 
+        #if UDPTUNNEL
+         //login
+        CheckUdpAuth(udpInfo.msock);
+        //reg tunnel
+        CheckRegTunnel(udpInfo.msock);
+        CheckUdpPing(udpInfo.msock);//ping
+        #endif // UDPTUNNEL
+
         //控制链接断开,关闭所有连接
-        if(mainsockstatus==0){
-            shutdown( mainsock,2);
+        if(mainInfo.mainsockstatus==0){
+            shutdown( mainInfo.mainsock,2);
             //释放所有连接
-            for ( it3 = socklist.begin(); it3 != socklist.end(); )
+            for ( it3 = G_SockList.begin(); it3 != G_SockList.end(); )
             {
-                clearsock( it3->first,  it3->second);
+                clearsock(it3->second);
                 it3++;
             }
-            socklist.clear();
-            mainsock = 0;
+            G_SockList.clear();
+            mainInfo.mainsock = 0;
             //改回状态
-            mainsockstatus=1;
+            mainInfo.mainsockstatus=1;
             //初始化通道
-            InitTunnelList(&tunnellist,&tunneladdr);
+            InitTunnelList();
         }
 
-	    if (lastdnsback == -1 ||(lastdnstime + 600) < get_curr_unixtime())
+	    if (mainInfo.lastdnsback == -1 ||(mainInfo.lastdnstime + 600) < getUnixTime())
 		{
-			lastdnsback	= net_dns( &server_addr, s_name, s_port );
-			lastdnstime	= get_curr_unixtime();
+			mainInfo.lastdnsback	= net_dns( &mainInfo.saddr, mainInfo.shost, mainInfo.sport );
+			mainInfo.lastdnstime	= getUnixTime();
 			printf( "update dns\r\n" );
 		}
 		//dns解析成功
-        if (lastdnsback != -1)
+        if (mainInfo.lastdnsback != -1)
         {
             CheckStatus();
         }
 
         //注册端口
-        if(socklist.count(mainsock)!=0&&mainsock!=0){
+        if(G_SockList.count(mainInfo.mainsock)!=0&&mainInfo.mainsock!=0){
 
-            tempinfo=socklist[mainsock];
-            if(tempinfo->isauth==1&&regtunneltime+60<get_curr_unixtime()){
-                regtunneltime=get_curr_unixtime();
-                for ( listit = tunnellist.begin(); listit != tunnellist.end(); ++listit )
+            tempinfo=G_SockList[mainInfo.mainsock];
+            if(tempinfo->isauth==1&&mainInfo.regtunneltime+60<getUnixTime()){
+                mainInfo.regtunneltime=getUnixTime();
+                for ( listit =G_TunnelList.begin(); listit != G_TunnelList.end(); ++listit )
                 {
-                    tunnelinfo =(TunnelInfo	*)*listit;
-                    if(tunnelinfo->regstate==0){
-                        memset(ReqId,0,20);
-                        memset(tunnelinfo->ReqId,0,20);
+                    tunnelinfo =(TunnelInfo	*)*listit;//udp不在这里注册
+                    if(tunnelinfo->regstate==0&&strcasecmp(tunnelinfo->protocol,"udp")!=0){
                         #if OPENSSL
-                        SendReqTunnel(mainsock,mainsslinfo->ssl,ReqId,tunnelinfo->protocol,tunnelinfo->hostname,tunnelinfo->subdomain, tunnelinfo->remoteport ,authtoken);
+                        SendReqTunnel(mainInfo.mainsock,mainsslinfo->ssl,tunnelinfo);
                         #else
-                        SendReqTunnel(mainsock,&mainsslinfo->ssl,ReqId,tunnelinfo->protocol,tunnelinfo->hostname,tunnelinfo->subdomain, tunnelinfo->remoteport,authtoken );
+                        SendReqTunnel(mainInfo.mainsock,&mainsslinfo->ssl,tunnelinfo);
                         #endif
-                        //copy
-                        memcpy(tunnelinfo->ReqId,ReqId,strlen(ReqId));
-                        tunnelinfo->regtime=get_curr_unixtime();//已发
                     }
                 }
             }
@@ -288,7 +242,7 @@ void* proxy(  )
 
 		/* 遍历添加 */
 		//map<int, sockinfo*>::iterator it;
-		for ( it = socklist.begin(); it != socklist.end();  )
+		for ( it = G_SockList.begin(); it != G_SockList.end();  )
 		{
 
 			tempinfo = it->second;
@@ -314,6 +268,15 @@ void* proxy(  )
         }
         #endif //
 
+        #if UDPTUNNEL
+        if(udpInfo.msock>0){
+            maxfdp = udpInfo.msock > maxfdp ? udpInfo.msock : maxfdp;
+            FD_SET(udpInfo.msock,&readSet );
+            maxfdp = udpInfo.lsock > maxfdp ? udpInfo.lsock : maxfdp;
+            FD_SET(udpInfo.lsock,&readSet );
+        }
+        #endif // UDPTUNNEL
+
 		if(maxfd==0)
 		{
 			sleeps( 500 );
@@ -337,22 +300,26 @@ void* proxy(  )
                 UdpCmd(udpsocket);
             }
             #endif
+            #if UDPTUNNEL
+               UdpRecv(&readSet);
+            #endif // UDPTUNNEL
 
-			for ( it1 = socklist.begin(); it1 != socklist.end(); )
+
+			for ( it1 = G_SockList.begin(); it1 != G_SockList.end(); )
 			{
 			    tempinfo = it1->second;
 			      //ping
                 checkping();//这里添加个ping避免超时
                 //判断连接超时sock
-                if((tempinfo->linktime+10)<get_curr_unixtime()&&tempinfo->isconnect==0)
+                if((tempinfo->linktime+10)<getUnixTime()&&tempinfo->isconnect==0)
                 {
 					//关闭远程连接
                     if(tempinfo->istype==2){
-                        echo("连接本地失败");
+                        echo("connect local fail\r\n");
                         shutdown( tempinfo->tosock, 2 );
                     }
-                    clearsock(it1->first,tempinfo);
-                    socklist.erase(it1++);
+                    clearsock(tempinfo);
+                    G_SockList.erase(it1++);
                     continue;
                 }
 
@@ -367,9 +334,10 @@ void* proxy(  )
                         //未连接本地
                         if ( tempinfo->isconnectlocal == 0 )
                         {
-                            backcode=ConnectLocal(sslinfo1,&it1,tempinfo,&socklist,&tunneladdr);
+                            backcode=ConnectLocal(sslinfo1,tempinfo);
                             if(backcode==-1)
                             {
+                              G_SockList.erase(it1++);
                               continue;
                             }
                         }
@@ -381,29 +349,31 @@ void* proxy(  )
                         //本地连接完成转发
                         if( tempinfo->isconnectlocal == 2 )
                         {
-                            backcode=RemoteToLocal(sslinfo1,tempinfo,&it1,&socklist);
+                            backcode=RemoteToLocal(sslinfo1,tempinfo);
                             if(backcode==-1)
                             {
+                              G_SockList.erase(it1++);
                               continue;
                             }
                         }
                     }
                     /* 本地的转发给远程 */
                     else if(tempinfo->istype == 2){
-                        backcode=LocalToRemote(&it1,tempinfo,sslinfo1,&socklist);
+                        backcode=LocalToRemote(tempinfo,sslinfo1);
                         if(backcode==-1)
                         {
+                          G_SockList.erase(it1++);
                           continue;
                         }
                     }
                     //控制连接
                     else if(tempinfo->istype ==3){
-                         backcode=CmdSock(&mainsock,tempinfo,&socklist,server_addr,&ClientId,authtoken,&tunnellist,&tunneladdr);
+                         backcode=CmdSock(&mainInfo.mainsock,tempinfo,mainInfo.saddr);
                          if(backcode==-1)
                          {
                              //控制链接断开，标记清空
-                             mainsockstatus=0;
-                             lasterrtime=get_curr_unixtime();
+                             mainInfo.mainsockstatus=0;
+                             mainInfo.lasterrtime=getUnixTime();
                              break;
                          }
                     }
@@ -423,8 +393,8 @@ void* proxy(  )
                                 echo("连接本地失败");
 							    shutdown( tempinfo->tosock, 2 );
 							}
-							clearsock(it1->first,tempinfo);
-							socklist.erase(it1++);
+							clearsock(tempinfo);
+							G_SockList.erase(it1++);
 							continue;
 						}
 
@@ -433,9 +403,10 @@ void* proxy(  )
 						if ( tempinfo->istype == 1 )
 						{
 						    //初始化远程连接
-                            backcode=RemoteSslInit(&it1,tempinfo,ClientId,&socklist);
+                            backcode=RemoteSslInit(tempinfo);
                             if(backcode==-1)
                             {
+                               G_SockList.erase(it1++);
                                continue;
                             }
                             /* 置为1 */
@@ -445,9 +416,9 @@ void* proxy(  )
                         //本地连接
                         if ( tempinfo->istype == 2 )
 						{
-                            if(socklist.count(tempinfo->tosock)>0)
+                            if(G_SockList.count(tempinfo->tosock)>0)
                             {
-                                tempinfo1 = socklist[tempinfo->tosock];
+                                tempinfo1 = G_SockList[tempinfo->tosock];
                                 tempinfo1->isconnectlocal=2;
                             }
                             /* 置为1 */

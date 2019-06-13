@@ -10,16 +10,18 @@
 #endif
 
 #ifndef ISMBEDTLS
-#define ISMBEDTLS 0
+#define ISMBEDTLS 1
 #endif
 
 #define MAXBUF 2048
 #define DEBUG 0
 #define UDPCMD  1
+#define UDPTUNNEL 1
 
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include "global.h"
 inline int echo(const char* format, ...)
 {
     int n=0;
